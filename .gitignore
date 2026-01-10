@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# Local/persistent data (Railway volume will hold this)
+data/
+*.db
+
+# Optional: if you never want config pushed
+# config.json
