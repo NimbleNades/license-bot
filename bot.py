@@ -1,6 +1,7 @@
 import os
 import tempfile
 import sys
+import json
 import atexit
 from typing import Optional, Tuple, Set
 
@@ -42,21 +43,64 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "1377544383154360340"))
 LOG_FULL_KEY = os.getenv("LOG_FULL_KEY", "false").lower() in ("1", "true", "yes", "y")
 
 # -------------------------
-# Config via ENV (Railway-friendly)
+# Owners (Railway-friendly)
 # -------------------------
 def parse_owner_ids(raw: str) -> Set[int]:
     out: Set[int] = set()
-    for part in (raw or "").split(","):
-        part = part.strip()
+    for part in (raw or "").replace(" ", "").split(","):
         if part.isdigit():
             out.add(int(part))
     return out
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-OWNER_IDS = parse_owner_ids(os.getenv("OWNER_IDS", ""))
 
-def is_owner(user_id: int) -> bool:
-    return user_id in OWNER_IDS
+# Supports either OWNER_IDS="1,2,3" or OWNER_ID="1"
+OWNER_IDS: Set[int] = set()
+OWNER_IDS |= parse_owner_ids(os.getenv("OWNER_IDS", ""))
+single_owner = os.getenv("OWNER_ID", "").strip()
+if single_owner.isdigit():
+    OWNER_IDS.add(int(single_owner))
+
+# Optional: also allow admins in a guild to use owner commands
+ALLOW_GUILD_ADMINS = os.getenv("ALLOW_GUILD_ADMINS", "false").lower() in ("1", "true", "yes", "y")
+
+def is_owner(interaction_or_user) -> bool:
+    """
+    Accepts either a user_id int OR a discord.Interaction OR a discord.User/Member.
+    """
+    # If they pass an int
+    if isinstance(interaction_or_user, int):
+        return interaction_or_user in OWNER_IDS
+
+    # If they pass an Interaction
+    if isinstance(interaction_or_user, discord.Interaction):
+        uid = interaction_or_user.user.id
+        if uid in OWNER_IDS:
+            return True
+
+        # Optional admin override
+        if ALLOW_GUILD_ADMINS and interaction_or_user.guild and isinstance(interaction_or_user.user, discord.Member):
+            perms = interaction_or_user.user.guild_permissions
+            if perms.administrator or perms.manage_guild:
+                return True
+
+        return False
+
+    # If they pass a User/Member
+    uid = interaction_or_user.id
+    return uid in OWNER_IDS
+
+async def ensure_app_owner_in_owner_ids():
+    """
+    Adds the Discord Application Owner to OWNER_IDS automatically.
+    This makes OWNER_IDS work even if you didn't set it.
+    """
+    try:
+        app = await bot.application_info()
+        OWNER_IDS.add(app.owner.id)
+        print(f"[OWNER] App owner added: {app.owner} ({app.owner.id})")
+    except Exception as e:
+        print(f"[OWNER] Could not fetch application owner: {type(e).__name__}: {e}")
 
 # -------------------------
 # Bot (create early so helpers can reference it)
@@ -393,6 +437,9 @@ async def dm_owners(embed: discord.Embed):
 # -------------------------
 @bot.event
 async def on_ready():
+    await ensure_app_owner_in_owner_ids()   # <-- ADD THIS
+    print(f"[OWNER] OWNER_IDS={sorted(list(OWNER_IDS))}")
+
     await init_db()
     try:
         synced = await bot.tree.sync()
@@ -408,7 +455,7 @@ async def on_ready():
 @app_commands.describe(program="temp / perm / private", user="The reseller")
 @app_commands.choices(program=choiceify(PROGRAMS))
 async def add_reseller_cmd(interaction: discord.Interaction, program: app_commands.Choice[str], user: discord.Member):
-    if not is_owner(interaction.user.id):
+    if not is_owner(interaction):
         return await interaction.response.send_message("Owner only.", ephemeral=True)
 
     await add_reseller_db(user.id, program.value)
@@ -444,7 +491,7 @@ async def add_reseller_cmd(interaction: discord.Interaction, program: app_comman
 @app_commands.describe(program="temp / perm / private", user="The reseller")
 @app_commands.choices(program=choiceify(PROGRAMS))
 async def remove_reseller_cmd(interaction: discord.Interaction, program: app_commands.Choice[str], user: discord.Member):
-    if not is_owner(interaction.user.id):
+    if not is_owner(interaction):
         return await interaction.response.send_message("Owner only.", ephemeral=True)
 
     await remove_reseller_db(user.id, program.value)
@@ -483,7 +530,7 @@ async def remove_reseller_cmd(interaction: discord.Interaction, program: app_com
 )
 @app_commands.choices(program=choiceify(PROGRAMS), duration=choiceify(DURATIONS))
 async def add_stock_file_cmd(interaction: discord.Interaction, program: app_commands.Choice[str], duration: app_commands.Choice[str], file: discord.Attachment):
-    if not is_owner(interaction.user.id):
+    if not is_owner(interaction):
         return await interaction.response.send_message("Owner only.", ephemeral=True)
 
     if not file.filename.lower().endswith(".txt"):
@@ -505,7 +552,7 @@ async def add_stock_file_cmd(interaction: discord.Interaction, program: app_comm
 @app_commands.describe(program="temp / perm / private", duration="day / week / month / lifetime")
 @app_commands.choices(program=choiceify(PROGRAMS), duration=choiceify(DURATIONS))
 async def clear_stock_cmd(interaction: discord.Interaction, program: app_commands.Choice[str], duration: app_commands.Choice[str]):
-    if not is_owner(interaction.user.id):
+    if not is_owner(interaction):
         return await interaction.response.send_message("Owner only.", ephemeral=True)
 
     prog = program.value
